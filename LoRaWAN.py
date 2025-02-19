@@ -1,112 +1,121 @@
-import os, sys
-currentdir = os.path.dirname(os.path.realpath(__file__))
-parentdir = os.path.dirname(currentdir)
-sys.path.append(parentdir)
-from LoRaRF import SX126x
+from RadioLib import SX1262
 import time
 import struct
-import random
 
-# AWS IoT Core LoRaWAN credentials
-DEVEUI = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]  # Replace with your DevEUI
-APPEUI = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]  # Replace with your AppEUI
-APPKEY = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # Replace with your AppKey
+# LoRaWAN credentials from AWS IoT Core
+DEVEUI = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]  # Replace with yours
+APPEUI = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]  # Replace with yours
+APPKEY = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # Replace with yours
          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
 
-# Initialize LoRa radio
-busId = 0
-csId = 0
-resetPin = 18
-busyPin = 20
-irqPin = 16
-txenPin = 6
-rxenPin = -1
+# Pin definitions for Raspberry Pi
+NSS_PIN = 10    # GPIO 10 - SPI CS
+RESET_PIN = 18  # GPIO 18
+BUSY_PIN = 20   # GPIO 20
+IRQ_PIN = 16    # GPIO 16
+DIO1_PIN = 16   # Same as IRQ
 
-LoRa = SX126x()
-print("Initializing LoRa radio...")
-if not LoRa.begin(busId, csId, resetPin, busyPin, irqPin, txenPin, rxenPin):
-    raise Exception("Failed to initialize LoRa radio")
+# Initialize SX1262
+radio = SX1262(NSS_PIN, RESET_PIN, BUSY_PIN, IRQ_PIN)
 
-# Configure radio parameters
-LoRa.setDio2RfSwitch()
-LoRa.setFrequency(868100000)  # EU868 Channel 0
-print("Set frequency to 868.1 MHz")
+def setup_lorawan():
+    print("Initializing LoRaWAN...")
+    
+    # Initialize radio
+    state = radio.begin()
+    if state != radio.ERR_NONE:
+        raise Exception(f"Failed to initialize radio: {state}")
+    
+    # Set LoRaWAN parameters
+    print("Setting up LoRaWAN parameters...")
+    radio.setFrequency(868100000)  # EU868 frequency
+    radio.setBandwidth(125.0)      # 125 kHz bandwidth
+    radio.setSpreadingFactor(7)    # SF7
+    radio.setCodingRate(5)         # 4/5 coding rate
+    radio.setOutputPower(14)       # 14 dBm output power
+    radio.setPreambleLength(8)     # Standard LoRaWAN preamble length
+    
+    # Set LoRaWAN credentials
+    print("Setting LoRaWAN credentials...")
+    radio.setDeviceEUI(DEVEUI)
+    radio.setApplicationEUI(APPEUI)
+    radio.setApplicationKey(APPKEY)
 
-# Set TX power
-LoRa.setTxPower(14, LoRa.TX_POWER_SX1262)  # 14 dBm is standard for LoRaWAN
-print("Set TX power to +14 dBm")
-
-# Configure LoRaWAN parameters
-sf = 7
-bw = 125000
-cr = 5
-LoRa.setLoRaModulation(sf, bw, cr)
-print(f"Set modulation parameters:\n\tSF = {sf}\n\tBW = {bw} Hz\n\tCR = 4/{cr}")
-
-# Set packet parameters
-headerType = LoRa.HEADER_EXPLICIT  # LoRaWAN uses explicit header
-preambleLength = 8
-payloadLength = 255  # Max payload length for flexibility
-crcType = True
-LoRa.setLoRaPacket(headerType, preambleLength, payloadLength, crcType)
-print("Packet parameters configured")
-
-# Initialize LoRaWAN
-print("\n-- LoRaWAN Node Starting --\n")
-LoRa.setLoRaWAN()  # Set radio to LoRaWAN mode
-LoRa.setDeviceEUI(DEVEUI)
-LoRa.setApplicationEUI(APPEUI)
-LoRa.setApplicationKey(APPKEY)
-
-# Join the network
-print("Attempting to join LoRaWAN network...")
-join_attempts = 0
-max_join_attempts = 5
-
-while join_attempts < max_join_attempts:
-    if LoRa.join():
-        print("Successfully joined the network!")
-        break
-    else:
+def join_network():
+    print("Attempting to join LoRaWAN network...")
+    
+    join_attempts = 0
+    max_attempts = 5
+    
+    while join_attempts < max_attempts:
+        state = radio.joinOTAA()
+        if state == radio.ERR_NONE:
+            print("Successfully joined the network!")
+            return True
+        
         join_attempts += 1
-        print(f"Join failed (attempt {join_attempts}/{max_join_attempts}), retrying...")
+        print(f"Join failed (attempt {join_attempts}/{max_attempts})")
         time.sleep(5)
+    
+    return False
 
-if join_attempts >= max_join_attempts:
-    raise Exception("Failed to join network after maximum attempts")
+def send_data(payload):
+    print("Preparing to send data...")
+    
+    # Send unconfirmed uplink on port 1
+    state = radio.beginPacket(1)
+    if state != radio.ERR_NONE:
+        print(f"Failed to start packet: {state}")
+        return False
+    
+    # Write payload
+    radio.write(payload)
+    
+    # Send packet
+    state = radio.endPacket()
+    if state == radio.ERR_NONE:
+        print("Packet sent successfully!")
+        return True
+    else:
+        print(f"Failed to send packet: {state}")
+        return False
 
-# Main sending loop
-message_counter = 0
-try:
-    while True:
-        # Prepare sensor data (example with temperature and humidity)
-        temperature = random.uniform(20.0, 25.0)  # Replace with actual sensor reading
-        humidity = random.uniform(40.0, 60.0)     # Replace with actual sensor reading
+def main():
+    try:
+        # Setup LoRaWAN
+        setup_lorawan()
         
-        # Pack data into bytes
-        data = struct.pack('ff', temperature, humidity)
+        # Join network
+        if not join_network():
+            raise Exception("Failed to join network after maximum attempts")
         
-        print(f"\nSending message {message_counter}")
-        print(f"Temperature: {temperature:.1f}°C")
-        print(f"Humidity: {humidity:.1f}%")
-        
-        # Send data
-        if LoRa.send(data):
-            print("Data sent successfully!")
-            print(f"Transmit time: {LoRa.transmitTime():.2f} ms")
-        else:
-            print("Failed to send data")
-            if LoRa.status() == LoRa.STATUS_TX_TIMEOUT:
-                print("Transmit timeout")
-        
-        message_counter += 1
-        
-        # Sleep between transmissions (e.g., 5 minutes)
-        LoRa.sleep()
-        time.sleep(300)  # Adjust this based on your needs and duty cycle requirements
-        LoRa.wake()
+        # Main loop
+        counter = 0
+        while True:
+            # Create sample payload (replace with your sensor data)
+            temperature = 23.5
+            humidity = 65.0
+            payload = struct.pack('ff', temperature, humidity)
+            
+            # Send data
+            if send_data(payload):
+                print(f"Message {counter} sent successfully")
+                print(f"Temperature: {temperature}°C")
+                print(f"Humidity: {humidity}%")
+            else:
+                print(f"Failed to send message {counter}")
+            
+            counter += 1
+            
+            # Wait before next transmission (respect duty cycle)
+            time.sleep(300)  # 5 minutes
+    
+    except KeyboardInterrupt:
+        print("\nStopping LoRaWAN node...")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        radio.sleep()
 
-except KeyboardInterrupt:
-    print("\nStopping LoRaWAN node...")
-finally:
-    LoRa.end()
+if __name__ == "__main__":
+    main()
